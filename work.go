@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"strings"
 	"unsafe"
 
 	log "github.com/sirupsen/logrus"
@@ -86,4 +87,17 @@ func ParseWork(args map[string]interface{}) (*Work, error) {
 	work.Target = target
 	work.Difficulty = difficulty
 	return work, nil
+}
+
+func WorkCopy(dest *Work, src *Work) {
+	copy(dest.Data, src.Data)
+	dest.Size = src.Size
+	dest.Difficulty = src.Difficulty
+	dest.Target = src.Target
+	if strings.Compare(src.JobID, "") != 0 {
+		dest.JobID = src.JobID
+	}
+	if strings.Compare(src.XNonce2, "") != 0 {
+		dest.XNonce2 = src.XNonce2
+	}
 }
