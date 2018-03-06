@@ -72,7 +72,7 @@ func ParseWork(args map[string]interface{}) (*Work, error) {
 	target = target64
 	log.Debugf("target: %X", target)
 	difficulty := float64(0xFFFFFFFFFFFFFFFF) / float64(target64)
-	log.Infof("Pool set difficulty: %.2f", difficulty)
+	log.Debugf("Pool set difficulty: %.2f", difficulty)
 
 	work := NewWork()
 
