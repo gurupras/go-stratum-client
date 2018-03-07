@@ -3,8 +3,10 @@ package stratum
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fatih/set"
@@ -30,6 +32,12 @@ type StratumContext struct {
 	submittedWorkRequestIds set.Interface
 	numAcceptedResults      uint64
 	numSubmittedResults     uint64
+	url                     string
+	username                string
+	password                string
+	connected               bool
+	lastReconnectTime       time.Time
+	writeLock               sync.Mutex
 }
 
 func New() *StratumContext {
@@ -49,6 +57,7 @@ func (sc *StratumContext) Connect(addr string) error {
 	}
 
 	log.Debugf("Dial success")
+	sc.url = addr
 	sc.Conn = conn
 	sc.reader = bufio.NewReader(conn)
 	return nil
@@ -116,90 +125,140 @@ func (sc *StratumContext) Authorize(username, password string) error {
 	}
 	if response.Error != nil {
 		return response.Error
-	} else {
-		log.Infof("Authorization successful")
-		sc.SessionID = response.Result["id"].(string)
-		if work, err := ParseWork(response.Result["job"].(map[string]interface{})); err != nil {
-			return err
-		} else {
-			log.Infof("Stratum detected new block")
-			sc.NotifyNewWork(work)
-		}
 	}
 
-	go func() {
-		for {
-			line, err := sc.ReadLine()
-			if err != nil {
-				log.Errorf("Failed to read string from stratum: %v", err)
-				continue
-			}
-			log.Debugf("Received line from server: %v", line)
+	log.Infof("Authorization successful")
+	sc.connected = true
+	sc.username = username
+	sc.password = password
 
-			var msg map[string]interface{}
-			if err = json.Unmarshal([]byte(line), &msg); err != nil {
-				log.Errorf("Failed to unmarshal line into JSON: %v", err)
-				continue
-			}
+	if sid, ok := response.Result["id"]; !ok {
+		return fmt.Errorf("Response did not have a sessionID: %v", response.String())
+	} else {
+		sc.SessionID = sid.(string)
+	}
+	work, err := ParseWork(response.Result["job"].(map[string]interface{}))
+	if err != nil {
+		return err
+	}
+	sc.NotifyNewWork(work)
 
-			id := msg["id"]
-			switch id.(type) {
-			case uint64, float64:
-				// This is a response
-				response, err := ParseResponse([]byte(line))
-				if err != nil {
-					log.Errorf("Failed to parse response from server: %v", err)
-				} else {
-					_ = response
-					id := uint64(response.MessageID.(float64))
-					if sc.submittedWorkRequestIds.Has(id) {
-						// This is a response from the server signalling that our work has been accepted
-						sc.submittedWorkRequestIds.Remove(id)
-						sc.numAcceptedResults++
-						sc.numSubmittedResults++
-						log.Infof("accepted %d/%d", sc.numAcceptedResults, sc.numSubmittedResults)
-					} else {
-						status := response.Result["status"].(string)
-						if strings.Compare(status, "OK") == 0 {
-							log.Errorf("Failed to properly mark submitted work as accepted. work ID: %v", response.MessageID)
-							log.Errorf("Works: %v", sc.submittedWorkRequestIds.List())
-						}
-					}
-					sc.NotifyResponse(response)
-				}
-			default:
-				// this is a notification
-				log.Debugf("Received message from stratum server: %v", msg)
-				switch msg["method"].(string) {
-				case "job":
-					if work, err := ParseWork(msg["params"].(map[string]interface{})); err != nil {
-						log.Errorf("Failed to parse job: %v", err)
-						continue
-					} else {
-						sc.NotifyNewWork(work)
-					}
-				default:
-					log.Errorf("Unknown method: %v", msg["method"])
-				}
-			}
-		}
-	}()
-
+	// Handle messages
+	go sc.RunHandleMessages()
 	// Keep-alive
-	go func() {
-		for {
-			time.Sleep(sc.KeepAliveDuration)
-			args := make(map[string]interface{})
-			args["id"] = sc.SessionID
-			if _, err := sc.Call("keepalived", args); err != nil {
-				log.Errorf("Failed keepalive: %v", err)
-			} else {
-				// log.Debugf("Posted keepalive")
-			}
-		}
-	}()
+	go sc.RunKeepAlive()
 
 	return nil
+}
+
+func (sc *StratumContext) RunKeepAlive() {
+	for sc.connected {
+		time.Sleep(sc.KeepAliveDuration)
+		args := make(map[string]interface{})
+		args["id"] = sc.SessionID
+		if _, err := sc.Call("keepalived", args); err != nil {
+			log.Errorf("Failed keepalive: %v", err)
+		} else {
+			log.Debugf("Posted keepalive")
+		}
+	}
+}
+
+func (sc *StratumContext) RunHandleMessages() {
+	for {
+		if !sc.connected {
+			break
+		}
+		line, err := sc.ReadLine()
+		if err != nil {
+			log.Debugf("Failed to read string from stratum: %v", err)
+			break
+		}
+		log.Debugf("Received line from server: %v", line)
+
+		var msg map[string]interface{}
+		if err = json.Unmarshal([]byte(line), &msg); err != nil {
+			log.Errorf("Failed to unmarshal line into JSON: '%s': %v", line, err)
+			break
+		}
+
+		id := msg["id"]
+		switch id.(type) {
+		case uint64, float64:
+			// This is a response
+			response, err := ParseResponse([]byte(line))
+			if err != nil {
+				log.Errorf("Failed to parse response from server: %v", err)
+				continue
+			}
+			isError := false
+			if response.Result == nil {
+				// This is an error
+				isError = true
+			}
+			id := uint64(response.MessageID.(float64))
+			if sc.submittedWorkRequestIds.Has(id) {
+				if !isError {
+					// This is a response from the server signalling that our work has been accepted
+					sc.submittedWorkRequestIds.Remove(id)
+					sc.numAcceptedResults++
+					sc.numSubmittedResults++
+					log.Infof("accepted %d/%d", sc.numAcceptedResults, sc.numSubmittedResults)
+				} else {
+					sc.submittedWorkRequestIds.Remove(id)
+					sc.numSubmittedResults++
+					log.Errorf("rejected %d/%d: %s", (sc.numSubmittedResults - sc.numAcceptedResults), sc.numSubmittedResults, response.Error.Message)
+				}
+			} else {
+				statusIntf, ok := response.Result["status"]
+				if !ok {
+					log.Warnf("Server sent back unknown message: %v", response.String())
+				} else {
+					status := statusIntf.(string)
+					switch status {
+					case "KEEPALIVED":
+						// Nothing to do
+					case "OK":
+						log.Errorf("Failed to properly mark submitted work as accepted. work ID: %v, message=%s", response.MessageID, response.String())
+						log.Errorf("Works: %v", sc.submittedWorkRequestIds.List())
+					}
+				}
+			}
+			sc.NotifyResponse(response)
+		default:
+			// this is a notification
+			log.Debugf("Received message from stratum server: %v", msg)
+			switch msg["method"].(string) {
+			case "job":
+				if work, err := ParseWork(msg["params"].(map[string]interface{})); err != nil {
+					log.Errorf("Failed to parse job: %v", err)
+					continue
+				} else {
+					sc.NotifyNewWork(work)
+				}
+			default:
+				log.Errorf("Unknown method: %v", msg["method"])
+			}
+		}
+	}
+	sc.Reconnect()
+}
+
+func (sc *StratumContext) Reconnect() {
+	sc.connected = false
+	if sc.Conn != nil && sc.connected {
+		log.Errorf("Disconnecting from pool %s", sc.url)
+		sc.Close()
+	}
+	now := time.Now()
+	if now.Sub(sc.lastReconnectTime) < 1*time.Second {
+		time.Sleep(1 * time.Second) //XXX: Should we sleeping the remaining time?
+	}
+	if err := sc.Connect(sc.url); err != nil {
+		// TODO: We should probably try n-times before crashing
+		log.Fatalf("Failled to reconnect to %v: %v", sc.url, err)
+	}
+	sc.Authorize(sc.username, sc.password)
 }
 
 func (sc *StratumContext) SubmitWork(work *Work, hash string) error {
@@ -221,7 +280,7 @@ func (sc *StratumContext) SubmitWork(work *Work, hash string) error {
 	} else {
 		sc.submittedWorkRequestIds.Add(uint64(req.MessageID.(int)))
 		// Successfully submitted result
-		log.Debugf("Successfully submitted work result")
+		log.Debugf("Successfully submitted work result: job=%v result=%v", work.JobID, hash)
 		args["work"] = work
 		sc.NotifySubmit(args)
 		sc.LastSubmittedWork = work
@@ -260,6 +319,15 @@ func ParseResponse(b []byte) (*Response, error) {
 }
 
 func (sc *StratumContext) NotifyNewWork(work *Work) {
+	if (sc.Work != nil && strings.Compare(work.JobID, sc.Work.JobID) == 0) || sc.submittedWorkRequestIds.Has(work.JobID) {
+		sc.connected = false
+		addr := sc.RemoteAddr().String()
+		log.Warnf("Duplicate job request. Reconnecting to: %v", addr)
+		sc.Close()
+		sc.Connect(addr)
+		sc.Authorize(sc.username, sc.password)
+		return
+	}
 	sc.Work = work
 	for _, obj := range sc.workListeners.List() {
 		ch := obj.(chan *Work)

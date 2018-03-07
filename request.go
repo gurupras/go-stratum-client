@@ -16,14 +16,14 @@ func NewRequest(id int, method string, args interface{}) *Request {
 	}
 }
 
-func (br *Request) JsonRPCString() (string, error) {
+func (r *Request) JsonRPCString() (string, error) {
 	payload := make(map[string]interface{})
 	payload["jsonrpc"] = "2.0"
-	payload["method"] = br.RemoteMethod
-	payload["id"] = br.MessageID
-	payload["params"] = br.Parameters
+	payload["method"] = r.RemoteMethod
+	payload["id"] = r.MessageID
+	payload["params"] = r.Parameters
 
-	b, err := json.Marshal(br)
+	b, err := json.Marshal(r)
 	if err != nil {
 		return "", err
 	}

@@ -14,3 +14,15 @@ func (r *Response) String() string {
 	b, _ := json.Marshal(r)
 	return string(b)
 }
+
+// OkResponse generates a response with the following format:
+// {"id": "<request.MessageID>", "error": null, "result": {"status": "OK"}}
+func OkResponse(r *Request) (*Response, error) {
+	return &Response{
+		r.MessageID,
+		map[string]interface{}{
+			"status": "OK",
+		},
+		nil,
+	}, nil
+}

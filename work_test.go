@@ -11,7 +11,7 @@ func TestParseWork(t *testing.T) {
 	// t.Skip("Usually skip since this is an infinite loop test")
 	require := require.New(t)
 
-	response, err := ParseResponse([]byte(TEST_JOB_STR))
+	response, err := ParseResponse([]byte(AUTH_RESPONSE_STR_1))
 	require.Nil(err)
 
 	work, err := ParseWorkFromResponse(response)
@@ -23,7 +23,7 @@ func TestParseWork(t *testing.T) {
 func TestNoncePtr(t *testing.T) {
 	require := require.New(t)
 
-	response, err := ParseResponse([]byte(TEST_JOB_STR))
+	response, err := ParseResponse([]byte(AUTH_RESPONSE_STR_1))
 	require.Nil(err)
 
 	work, err := ParseWorkFromResponse(response)
