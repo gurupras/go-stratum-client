@@ -108,6 +108,7 @@ func TestReconnect(t *testing.T) {
 
 	go func() {
 		for obj := range server.EventChan {
+			log.Infof("test: Got object: %t", obj)
 			switch evt := obj.(type) {
 			case *TsErrorEvent:
 				require.Fail(fmt.Sprintf("Unexpected failure on method=%v: %v", evt.ClientRequest.Request.RemoteMethod, evt.Error()))
@@ -115,12 +116,12 @@ func TestReconnect(t *testing.T) {
 				log.Debugf("Message event")
 				switch evt.Method {
 				case "login":
-					log.Debugf("login event")
+					log.Infof("login event")
 					_, err = evt.ClientRequest.Conn.Write([]byte(evt.DefaultResponse.String() + "\n"))
 					require.Nil(err)
 					wg.Done()
 				case "submit":
-					log.Debugf("submit event")
+					log.Infof("submit event")
 					_, err = evt.ClientRequest.Conn.Write([]byte(evt.DefaultResponse.String() + "\n"))
 					require.Nil(err)
 					request, err := server.RandomJob()
@@ -130,10 +131,11 @@ func TestReconnect(t *testing.T) {
 					_, err = evt.ClientRequest.Conn.Write([]byte(requestStr))
 					require.Nil(err)
 				case "keepalived":
-					log.Debugf("keepalived event")
+					log.Infof("keepalived event")
 					// Write partial message and close connection
 					_, err = evt.ClientRequest.Conn.Write([]byte(evt.DefaultResponse.String()[:10] + "\n"))
 					require.Nil(err)
+					evt.ClientRequest.Conn.Close()
 				default:
 					require.Fail(fmt.Sprintf("Unknown remoteMethod: %v", evt.Method))
 				}
@@ -302,6 +304,7 @@ func TestParallelWrites(t *testing.T) {
 	wg.Wait()
 	server.Close()
 }
+
 func TestMain(m *testing.M) {
 	log.SetLevel(log.WarnLevel)
 

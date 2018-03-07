@@ -73,6 +73,7 @@ func NewTestServer(port int) (*TestServer, error) {
 		for {
 			conn, err := snl.Accept()
 			if err != nil {
+				// log.Errorf("Failed to accept connection! Terminating test-server: %v", err)
 				break
 			}
 			log.Infof("Received connection from '%v'", conn.RemoteAddr())
@@ -83,6 +84,7 @@ func NewTestServer(port int) (*TestServer, error) {
 }
 
 func (ts *TestServer) handleConnection(conn net.Conn) {
+	log.Infof("Starting handleConnection for conn: %v", conn.RemoteAddr())
 	reader := bufio.NewReader(conn)
 	for {
 		msg, err := reader.ReadString('\n')
@@ -96,6 +98,7 @@ func (ts *TestServer) handleConnection(conn net.Conn) {
 		if err := json.Unmarshal([]byte(msg), &request); err != nil {
 			log.Errorf("Message not in JSON format: '%s': %v", msg, err)
 		} else {
+			log.Infof("Sending request down RequestChan: %v", request)
 			ts.RequestChan <- &ClientRequest{
 				conn,
 				&request,
@@ -108,7 +111,7 @@ func (ts *TestServer) defaultHandler() {
 	for clientRequest := range ts.RequestChan {
 		var err error
 		var response *Response
-		log.Debugf("Received message: %v", clientRequest.Request)
+		log.Infof("RequestChan: Received message: %v", clientRequest.Request)
 		switch clientRequest.Request.RemoteMethod {
 		case "login":
 			if response, err = ts.RandomAuthResponse(); err != nil {
@@ -130,13 +133,13 @@ func (ts *TestServer) defaultHandler() {
 			}
 		}
 		if err != nil {
-			log.Debugf("Sending error down eventChan")
+			log.Infof("Sending error down eventChan")
 			ts.EventChan <- &TsErrorEvent{
 				clientRequest,
 				err,
 			}
 		} else {
-			log.Debugf("Sending message down eventChan")
+			log.Infof("Sending message down eventChan")
 			ts.EventChan <- &TsMessageEvent{
 				clientRequest.Request.RemoteMethod,
 				clientRequest,
@@ -144,6 +147,7 @@ func (ts *TestServer) defaultHandler() {
 			}
 		}
 	}
+	panic("This goroutine must not terimate")
 }
 
 // RandomAuthResponse sends back one of the hard-coded response strings

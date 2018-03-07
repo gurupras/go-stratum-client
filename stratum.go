@@ -20,6 +20,7 @@ var (
 type StratumOnWorkHandler func(work *Work)
 type StratumContext struct {
 	net.Conn
+	sync.Mutex
 	reader                  *bufio.Reader
 	id                      int
 	SessionID               string
@@ -37,7 +38,7 @@ type StratumContext struct {
 	password                string
 	connected               bool
 	lastReconnectTime       time.Time
-	writeLock               sync.Mutex
+	stopChan                chan struct{}
 }
 
 func New() *StratumContext {
@@ -47,6 +48,7 @@ func New() *StratumContext {
 	sc.submitListeners = set.New()
 	sc.responseListeners = set.New()
 	sc.submittedWorkRequestIds = set.New()
+	sc.stopChan = make(chan struct{})
 	return sc
 }
 
@@ -71,9 +73,12 @@ func (sc *StratumContext) Call(serviceMethod string, args interface{}) (*Request
 	if err != nil {
 		return nil, err
 	}
+	// sc.Lock()
+	// defer sc.Unlock()
 	if _, err := sc.Write([]byte(str)); err != nil {
 		return nil, err
 	}
+	log.Debugf("Sent to server via conn: %v: %v", sc.Conn.LocalAddr(), str)
 	return req, nil
 }
 
@@ -119,6 +124,7 @@ func (sc *StratumContext) Authorize(username, password string) error {
 		return err
 	}
 
+	log.Debugf("Triggered login..awaiting response")
 	response, err := sc.ReadResponse()
 	if err != nil {
 		return err
@@ -127,7 +133,7 @@ func (sc *StratumContext) Authorize(username, password string) error {
 		return response.Error
 	}
 
-	log.Infof("Authorization successful")
+	log.Debugf("Authorization successful")
 	sc.connected = true
 	sc.username = username
 	sc.password = password
@@ -152,23 +158,24 @@ func (sc *StratumContext) Authorize(username, password string) error {
 }
 
 func (sc *StratumContext) RunKeepAlive() {
-	for sc.connected {
-		time.Sleep(sc.KeepAliveDuration)
-		args := make(map[string]interface{})
-		args["id"] = sc.SessionID
-		if _, err := sc.Call("keepalived", args); err != nil {
-			log.Errorf("Failed keepalive: %v", err)
-		} else {
-			log.Debugf("Posted keepalive")
+	for {
+		select {
+		case <-sc.stopChan:
+			return
+		case <-time.After(sc.KeepAliveDuration):
+			args := make(map[string]interface{})
+			args["id"] = sc.SessionID
+			if _, err := sc.Call("keepalived", args); err != nil {
+				log.Errorf("Failed keepalive: %v", err)
+			} else {
+				log.Debugf("Posted keepalive")
+			}
 		}
 	}
 }
 
 func (sc *StratumContext) RunHandleMessages() {
-	for {
-		if !sc.connected {
-			break
-		}
+	for sc.connected {
 		line, err := sc.ReadLine()
 		if err != nil {
 			log.Debugf("Failed to read string from stratum: %v", err)
@@ -245,11 +252,14 @@ func (sc *StratumContext) RunHandleMessages() {
 }
 
 func (sc *StratumContext) Reconnect() {
-	sc.connected = false
-	if sc.Conn != nil && sc.connected {
-		log.Errorf("Disconnecting from pool %s", sc.url)
+	// sc.Lock()
+	sc.stopChan <- struct{}{}
+	if sc.Conn != nil {
 		sc.Close()
+		sc.Conn = nil
 	}
+	// sc.Unlock()
+	log.Infof("Reconnecting ...")
 	now := time.Now()
 	if now.Sub(sc.lastReconnectTime) < 1*time.Second {
 		time.Sleep(1 * time.Second) //XXX: Should we sleeping the remaining time?
@@ -258,6 +268,7 @@ func (sc *StratumContext) Reconnect() {
 		// TODO: We should probably try n-times before crashing
 		log.Fatalf("Failled to reconnect to %v: %v", sc.url, err)
 	}
+	log.Debugf("Connected. Authorizing ...")
 	sc.Authorize(sc.username, sc.password)
 }
 
@@ -320,12 +331,10 @@ func ParseResponse(b []byte) (*Response, error) {
 
 func (sc *StratumContext) NotifyNewWork(work *Work) {
 	if (sc.Work != nil && strings.Compare(work.JobID, sc.Work.JobID) == 0) || sc.submittedWorkRequestIds.Has(work.JobID) {
+		log.Warnf("Duplicate job request. Reconnecting to: %v", sc.url)
+		// Just disconnect
 		sc.connected = false
-		addr := sc.RemoteAddr().String()
-		log.Warnf("Duplicate job request. Reconnecting to: %v", addr)
 		sc.Close()
-		sc.Connect(addr)
-		sc.Authorize(sc.username, sc.password)
 		return
 	}
 	sc.Work = work
