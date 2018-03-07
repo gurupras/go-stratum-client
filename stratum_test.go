@@ -1,6 +1,7 @@
 package stratum
 
 import (
+	"fmt"
 	"io/ioutil"
 	"os"
 	"sync"
@@ -104,34 +105,45 @@ func TestReconnect(t *testing.T) {
 
 	wg := sync.WaitGroup{}
 	wg.Add(5)
+
 	go func() {
-		for clientRequest := range server.RequestChan {
-			switch clientRequest.Request.RemoteMethod {
-			case "login":
-				response, err := server.RandomAuthResponse()
-				require.Nil(err)
-				_, err = clientRequest.Conn.Write([]byte(response.String() + "\n"))
-				require.Nil(err)
-				wg.Done()
-			case "submit":
-				response, err := OkResponse(clientRequest.Request)
-				require.Nil(err)
-				clientRequest.Conn.Write([]byte(response.String() + "\n"))
-				request, err := server.RandomJob()
-				require.Nil(err)
-				requestStr, err := request.JsonRPCString()
-				require.Nil(err)
-				clientRequest.Conn.Write([]byte(requestStr))
-			case "keepalived":
-				response, err := OkResponse(clientRequest.Request)
-				require.Nil(err)
-				// Write partial message and close connection
-				clientRequest.Conn.Write([]byte(response.String()[:10]))
-				clientRequest.Conn.Close()
+		for obj := range server.EventChan {
+			switch evt := obj.(type) {
+			case *TsErrorEvent:
+				require.Fail(fmt.Sprintf("Unexpected failure on method=%v: %v", evt.ClientRequest.Request.RemoteMethod, evt.Error()))
+			case *TsMessageEvent:
+				log.Debugf("Message event")
+				switch evt.Method {
+				case "login":
+					log.Debugf("login event")
+					_, err = evt.ClientRequest.Conn.Write([]byte(evt.DefaultResponse.String() + "\n"))
+					require.Nil(err)
+					wg.Done()
+				case "submit":
+					log.Debugf("submit event")
+					_, err = evt.ClientRequest.Conn.Write([]byte(evt.DefaultResponse.String() + "\n"))
+					require.Nil(err)
+					request, err := server.RandomJob()
+					require.Nil(err)
+					requestStr, err := request.JsonRPCString()
+					require.Nil(err)
+					_, err = evt.ClientRequest.Conn.Write([]byte(requestStr))
+					require.Nil(err)
+				case "keepalived":
+					log.Debugf("keepalived event")
+					// Write partial message and close connection
+					_, err = evt.ClientRequest.Conn.Write([]byte(evt.DefaultResponse.String()[:10] + "\n"))
+					require.Nil(err)
+				default:
+					require.Fail(fmt.Sprintf("Unknown remoteMethod: %v", evt.Method))
+				}
+			default:
+				require.Fail("Received unknown event: %t", evt)
 			}
-			log.Debugf("Received message: %v", clientRequest.Request)
 		}
 	}()
+
+	go server.defaultHandler()
 
 	sc := New()
 	err = sc.Connect("localhost:7223")
@@ -168,41 +180,42 @@ func TestKeepAlive(t *testing.T) {
 
 	go func() {
 		defer wg.Done()
-		for clientRequest := range server.RequestChan {
-			switch clientRequest.Request.RemoteMethod {
-			case "login":
-				response, err := server.RandomAuthResponse()
-				require.Nil(err)
-				clientRequest.Conn.Write([]byte(response.String() + "\n"))
-			case "submit":
-				response, err := OkResponse(clientRequest.Request)
-				require.Nil(err)
-				clientRequest.Conn.Write([]byte(response.String() + "\n"))
-				request, err := server.RandomJob()
-				require.Nil(err)
-				requestStr, err := request.JsonRPCString()
-				require.Nil(err)
-				clientRequest.Conn.Write([]byte(requestStr))
-			case "keepalived":
-				log.Infof("Handing keepalive")
-				id := clientRequest.Request.MessageID
-				response := &Response{
-					id,
-					map[string]interface{}{
-						"status": "KEEPALIVED",
-					},
-					nil,
+		for obj := range server.EventChan {
+			switch evt := obj.(type) {
+			case *TsErrorEvent:
+				require.Fail(fmt.Sprintf("Unexpected failure on method=%v: %v", evt.ClientRequest.Request.RemoteMethod, evt.Error()))
+			case *TsMessageEvent:
+				switch evt.Method {
+				case "login":
+					_, err = evt.ClientRequest.Conn.Write([]byte(evt.DefaultResponse.String() + "\n"))
+					require.Nil(err)
+					wg.Done()
+				case "submit":
+					_, err = evt.ClientRequest.Conn.Write([]byte(evt.DefaultResponse.String() + "\n"))
+					require.Nil(err)
+					request, err := server.RandomJob()
+					require.Nil(err)
+					requestStr, err := request.JsonRPCString()
+					require.Nil(err)
+					_, err = evt.ClientRequest.Conn.Write([]byte(requestStr))
+					require.Nil(err)
+				case "keepalived":
+					// Write partial message and close connection
+					_, err = evt.ClientRequest.Conn.Write([]byte(evt.DefaultResponse.String()[:10] + "\n"))
+					require.Nil(err)
+					count--
+					if count == 0 {
+						return
+					}
+				default:
+					require.Fail(fmt.Sprintf("Unknown remoteMethod: %v", evt.Method))
 				}
-				_, err := clientRequest.Conn.Write([]byte(response.String() + "\n"))
-				require.Nil(err)
-				count--
-				if count == 0 {
-					return
-				}
+			default:
+				require.Fail("Received unknown event: %t", evt)
 			}
-			log.Debugf("Received message: %v", clientRequest.Request)
 		}
 	}()
+	go server.defaultHandler()
 
 	sc := New()
 	err = sc.Connect("localhost:7223")
@@ -238,32 +251,35 @@ func TestParallelWrites(t *testing.T) {
 
 	go func() {
 		defer wg.Done()
-		for clientRequest := range server.RequestChan {
-			switch clientRequest.Request.RemoteMethod {
-			case "login":
-				response, err := server.RandomAuthResponse()
-				require.Nil(err)
-				clientRequest.Conn.Write([]byte(response.String() + "\n"))
-			case "submit":
-				log.Warnf("Unexpected")
-			case "keepalived":
-				id := clientRequest.Request.MessageID
-				response := &Response{
-					id,
-					map[string]interface{}{
-						"status": "KEEPALIVED",
-					},
-					nil,
+		for obj := range server.EventChan {
+			switch evt := obj.(type) {
+			case *TsErrorEvent:
+				require.Fail(fmt.Sprintf("Unexpected failure on method=%v: %v", evt.ClientRequest.Request.RemoteMethod, evt.Error()))
+			case *TsMessageEvent:
+				switch evt.Method {
+				case "login":
+					_, err = evt.ClientRequest.Conn.Write([]byte(evt.DefaultResponse.String() + "\n"))
+					require.Nil(err)
+					wg.Done()
+				case "submit":
+					require.Fail("Unexpectedly received a job submission")
+				case "keepalived":
+					// Write partial message and close connection
+					_, err = evt.ClientRequest.Conn.Write([]byte(evt.DefaultResponse.String()[:10] + "\n"))
+					require.Nil(err)
+					atomic.AddInt32(&count, -1)
+					if count == 0 {
+						return
+					}
+				default:
+					require.Fail(fmt.Sprintf("Unknown remoteMethod: %v", evt.Method))
 				}
-				_, err := clientRequest.Conn.Write([]byte(response.String() + "\n"))
-				require.Nil(err)
-				atomic.AddInt32(&count, -1)
-				if count == 0 {
-					return
-				}
+			default:
+				require.Fail("Received unknown event: %t", evt)
 			}
 		}
 	}()
+	go server.defaultHandler()
 
 	sc := New()
 	err = sc.Connect("localhost:7223")

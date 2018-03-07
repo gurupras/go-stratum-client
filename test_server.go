@@ -14,7 +14,19 @@ import (
 type TestServer struct {
 	*stoppablenetlistener.StoppableNetListener
 	RequestChan chan *ClientRequest
+	EventChan   chan interface{}
 	jobCounter  int
+}
+
+type TsErrorEvent struct {
+	*ClientRequest
+	error
+}
+
+type TsMessageEvent struct {
+	Method string
+	*ClientRequest
+	DefaultResponse *Response
 }
 
 type ClientRequest struct {
@@ -54,6 +66,7 @@ func NewTestServer(port int) (*TestServer, error) {
 	ts := &TestServer{
 		snl,
 		make(chan *ClientRequest),
+		make(chan interface{}),
 		0,
 	}
 	go func() {
@@ -86,6 +99,48 @@ func (ts *TestServer) handleConnection(conn net.Conn) {
 			ts.RequestChan <- &ClientRequest{
 				conn,
 				&request,
+			}
+		}
+	}
+}
+
+func (ts *TestServer) defaultHandler() {
+	for clientRequest := range ts.RequestChan {
+		var err error
+		var response *Response
+		log.Debugf("Received message: %v", clientRequest.Request)
+		switch clientRequest.Request.RemoteMethod {
+		case "login":
+			if response, err = ts.RandomAuthResponse(); err != nil {
+				break
+			}
+		case "submit":
+			if response, err = OkResponse(clientRequest.Request); err != nil {
+				break
+			}
+		case "keepalived":
+			log.Infof("Handing keepalive")
+			id := clientRequest.Request.MessageID
+			response = &Response{
+				id,
+				map[string]interface{}{
+					"status": "KEEPALIVED",
+				},
+				nil,
+			}
+		}
+		if err != nil {
+			log.Debugf("Sending error down eventChan")
+			ts.EventChan <- &TsErrorEvent{
+				clientRequest,
+				err,
+			}
+		} else {
+			log.Debugf("Sending message down eventChan")
+			ts.EventChan <- &TsMessageEvent{
+				clientRequest.Request.RemoteMethod,
+				clientRequest,
+				response,
 			}
 		}
 	}
