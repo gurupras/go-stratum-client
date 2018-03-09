@@ -361,7 +361,7 @@ func (sc *StratumContext) NotifyNewWork(work *Work) {
 		sc.Close()
 		return
 	}
-	log.Infof("\x1B[01;35mnew job\x1B[0m from \x1B[01;37m%v\x1B[0m diff \x1B[01;37m%d \x1B[0m ", sc.RemoteAddr(), int(work.Difficulty))
+	log.Infof("\x1B[01;35mnew job\x1B[0m from \x1B[01;37m%v\x1B[0m diff \x1B[01;37m%d \x1B[0m ", sc.url, int(work.Difficulty))
 	sc.Work = work
 	for _, obj := range sc.workListeners.List() {
 		ch := obj.(chan *Work)
