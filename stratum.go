@@ -65,7 +65,17 @@ func (sc *StratumContext) Connect(addr string) error {
 	return nil
 }
 
+// Call issues a JSONRPC request for the specified serviceMethod.
+// It works by calling CallLocked while holding the StratumContext lock
 func (sc *StratumContext) Call(serviceMethod string, args interface{}) (*Request, error) {
+	sc.Lock()
+	defer sc.Unlock()
+	return sc.CallLocked(serviceMethod, args)
+}
+
+// CallLocked issues a JSONRPC request for the specified serviceMethod.
+// The StratumContext lock is expected to be held by the caller
+func (sc *StratumContext) CallLocked(serviceMethod string, args interface{}) (*Request, error) {
 	sc.id++
 
 	req := NewRequest(sc.id, serviceMethod, args)
@@ -73,8 +83,7 @@ func (sc *StratumContext) Call(serviceMethod string, args interface{}) (*Request
 	if err != nil {
 		return nil, err
 	}
-	// sc.Lock()
-	// defer sc.Unlock()
+
 	if _, err := sc.Write([]byte(str)); err != nil {
 		return nil, err
 	}
@@ -113,13 +122,19 @@ func (sc *StratumContext) ReadResponse() (*Response, error) {
 }
 
 func (sc *StratumContext) Authorize(username, password string) error {
+	sc.Lock()
+	defer sc.Unlock()
+	return sc.authorizeLocked(username, password)
+}
+
+func (sc *StratumContext) authorizeLocked(username, password string) error {
 	log.Debugf("Beginning authorize")
 	args := make(map[string]interface{})
 	args["login"] = username
 	args["pass"] = password
 	args["agent"] = "go-stratum-client"
 
-	_, err := sc.Call("login", args)
+	_, err := sc.CallLocked("login", args)
 	if err != nil {
 		return err
 	}
@@ -133,20 +148,20 @@ func (sc *StratumContext) Authorize(username, password string) error {
 		return response.Error
 	}
 
-	log.Debugf("Authorization successful")
 	sc.connected = true
 	sc.username = username
 	sc.password = password
 
-	if sid, ok := response.Result["id"]; !ok {
+	sid, ok := response.Result["id"]
+	if !ok {
 		return fmt.Errorf("Response did not have a sessionID: %v", response.String())
-	} else {
-		sc.SessionID = sid.(string)
 	}
+	sc.SessionID = sid.(string)
 	work, err := ParseWork(response.Result["job"].(map[string]interface{}))
 	if err != nil {
 		return err
 	}
+	log.Debugf("Authorization successful")
 	sc.NotifyNewWork(work)
 
 	// Handle messages
@@ -154,28 +169,38 @@ func (sc *StratumContext) Authorize(username, password string) error {
 	// Keep-alive
 	go sc.RunKeepAlive()
 
+	log.Debugf("Returning from authorizeLocked")
 	return nil
 }
 
 func (sc *StratumContext) RunKeepAlive() {
+	sendKeepAlive := func() {
+		args := make(map[string]interface{})
+		args["id"] = sc.SessionID
+		if _, err := sc.Call("keepalived", args); err != nil {
+			log.Errorf("Failed keepalive: %v", err)
+		} else {
+			log.Debugf("Posted keepalive")
+		}
+	}
+
 	for {
 		select {
 		case <-sc.stopChan:
 			return
 		case <-time.After(sc.KeepAliveDuration):
-			args := make(map[string]interface{})
-			args["id"] = sc.SessionID
-			if _, err := sc.Call("keepalived", args); err != nil {
-				log.Errorf("Failed keepalive: %v", err)
-			} else {
-				log.Debugf("Posted keepalive")
-			}
+			go sendKeepAlive()
 		}
 	}
 }
 
 func (sc *StratumContext) RunHandleMessages() {
-	for sc.connected {
+	// This loop only ends on error
+	defer func() {
+		sc.Reconnect()
+	}()
+
+	for {
 		line, err := sc.ReadLine()
 		if err != nil {
 			log.Debugf("Failed to read string from stratum: %v", err)
@@ -248,17 +273,16 @@ func (sc *StratumContext) RunHandleMessages() {
 			}
 		}
 	}
-	sc.Reconnect()
 }
 
 func (sc *StratumContext) Reconnect() {
-	// sc.Lock()
+	sc.Lock()
+	defer sc.Unlock()
 	sc.stopChan <- struct{}{}
 	if sc.Conn != nil {
 		sc.Close()
 		sc.Conn = nil
 	}
-	// sc.Unlock()
 	log.Infof("Reconnecting ...")
 	now := time.Now()
 	if now.Sub(sc.lastReconnectTime) < 1*time.Second {
@@ -269,7 +293,7 @@ func (sc *StratumContext) Reconnect() {
 		log.Fatalf("Failled to reconnect to %v: %v", sc.url, err)
 	}
 	log.Debugf("Connected. Authorizing ...")
-	sc.Authorize(sc.username, sc.password)
+	sc.authorizeLocked(sc.username, sc.password)
 }
 
 func (sc *StratumContext) SubmitWork(work *Work, hash string) error {
@@ -357,4 +381,22 @@ func (sc *StratumContext) NotifyResponse(response *Response) {
 		ch := obj.(chan *Response)
 		ch <- response
 	}
+}
+
+func (sc *StratumContext) Lock() {
+	sc.Mutex.Lock()
+}
+
+func (sc *StratumContext) lockDebug() {
+	sc.Mutex.Lock()
+	log.Debugf("Lock acquired by: %v", MyCaller())
+}
+
+func (sc *StratumContext) Unlock() {
+	sc.Mutex.Unlock()
+}
+
+func (sc *StratumContext) unlockDebug() {
+	sc.Mutex.Unlock()
+	log.Debugf("Lock released by: %v", MyCaller())
 }

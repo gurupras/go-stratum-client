@@ -156,10 +156,13 @@ func TestReconnect(t *testing.T) {
 
 	go func() {
 		for work := range workChan {
-			time.Sleep(300 * time.Millisecond)
-			if err := sc.SubmitWork(work, "0"); err != nil {
-				log.Warnf("Failed work submission: %v", err)
-			}
+			go func(work *Work) {
+				time.Sleep(300 * time.Millisecond)
+				log.Debugf("Triggering work submission")
+				if err := sc.SubmitWork(work, "0"); err != nil {
+					log.Warnf("Failed work submission: %v", err)
+				}
+			}(work)
 		}
 	}()
 
@@ -228,10 +231,13 @@ func TestKeepAlive(t *testing.T) {
 
 	go func() {
 		for work := range workChan {
-			time.Sleep(300 * time.Millisecond)
-			if err := sc.SubmitWork(work, "0"); err != nil {
-				log.Warnf("Failed work submission: %v", err)
-			}
+			go func(work *Work) {
+				time.Sleep(300 * time.Millisecond)
+				log.Debugf("Triggering work submission")
+				if err := sc.SubmitWork(work, "0"); err != nil {
+					log.Warnf("Failed work submission: %v", err)
+				}
+			}(work)
 		}
 	}()
 	sc.KeepAliveDuration = 100 * time.Millisecond
