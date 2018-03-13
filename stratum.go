@@ -283,14 +283,20 @@ func (sc *StratumContext) Reconnect() {
 		sc.Close()
 		sc.Conn = nil
 	}
-	log.Infof("Reconnecting ...")
-	now := time.Now()
-	if now.Sub(sc.lastReconnectTime) < 1*time.Second {
-		time.Sleep(1 * time.Second) //XXX: Should we sleeping the remaining time?
-	}
-	if err := sc.Connect(sc.url); err != nil {
-		// TODO: We should probably try n-times before crashing
-		log.Fatalf("Failled to reconnect to %v: %v", sc.url, err)
+	reconnectTimeout := 1 * time.Second
+	for {
+		log.Infof("Reconnecting ...")
+		now := time.Now()
+		if now.Sub(sc.lastReconnectTime) < reconnectTimeout {
+			time.Sleep(reconnectTimeout) //XXX: Should we sleeping the remaining time?
+		}
+		if err := sc.Connect(sc.url); err != nil {
+			// TODO: We should probably try n-times before crashing
+			log.Errorf("Failled to reconnect to %v: %v", sc.url, err)
+			reconnectTimeout = 5 * time.Second
+		} else {
+			break
+		}
 	}
 	log.Debugf("Connected. Authorizing ...")
 	sc.authorizeLocked(sc.username, sc.password)
